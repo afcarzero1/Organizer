@@ -143,12 +143,14 @@ class DataBasehandler:
 
     @staticmethod
     def str_to_priority(priority: str) -> int:
-        if priority == "High":
+        if priority == "Immediate":
             return 0
-        elif priority == "Middle":
+        if priority == "High":
             return 1
-        else:
+        elif priority == "Middle":
             return 2
+        else:
+            return 3
 
     @staticmethod
     def str_to_status(status: str) -> int:

@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, List
+from typing import Any, List, Dict
 
 from Interface.pages.databases import DataBasehandler, ScheduleDatabase, Task, Slot
 import pandas as pd
@@ -107,10 +107,16 @@ class SolverSchedule:
 
     MAX_PRIORITY = 10
 
+    @dataclasses.dataclass
+    class Options:
+        soft_margins: bool = True
+        hard_constraint_priority: bool = False
+
     def __init__(self,
                  all_tasks: List[Task],
-                 all_slots: List[Slot]
-                 ):
+                 all_slots: List[Slot],
+                 options: Options = Options()):
+
         """
         Initialize the solver
 
@@ -123,6 +129,7 @@ class SolverSchedule:
         self.all_slots = all_slots
         self.number_days = PreProcessor.estimate_days_feasibility(all_slots, all_tasks)
         self.available_slots = PreProcessor.generate_days_slots(all_slots, self.number_days)
+        self.options = options
 
         # Initialize variables
         self.x = {}
@@ -178,9 +185,10 @@ class SolverSchedule:
                 self.x[slot, task] = var
 
             # Variable defining if the task fills strictly in the slot, and a penality in case it does not
-            self.strict[slot] = self.model.NewBoolVar(f"strict[{slot}]")
-            self.penalties[slot] = self.model.NewIntVar(0, max([task.estimated_time for task in self.all_tasks]),
-                                                        f"penalties[{slot}]")
+            if self.options.soft_margins:
+                self.strict[slot] = self.model.NewBoolVar(f"strict[{slot}]")
+                self.penalties[slot] = self.model.NewIntVar(0, max([task.estimated_time for task in self.all_tasks]),
+                                                            f"penalties[{slot}]")
         return self.x
 
     def define_constraints(self):
@@ -195,69 +203,108 @@ class SolverSchedule:
 
         # Add constraint about length of tasks not overpassing slot size
         for index_slot, slot in enumerate(self.available_slots):
-
             # Define the sum of the duration of the tasks assigned to a slot
             sum_tasks_slot = (sum(self.x[index_slot, task] * self.all_tasks[task].estimated_time
-                                 for task in range((len(self.all_tasks)))))
+                                  for task in range((len(self.all_tasks)))))
 
-            # The sum of the duration of the tasks assigned to a slot cannot exceed the duration of the slot. When the
-            # contraint is strict
-            self.model.Add(sum_tasks_slot <= int(slot.slot.get_duration().total_seconds() / 60)).\
-                OnlyEnforceIf(self.strict[index_slot])
+            if self.options.soft_margins:
+                # The sum of the duration of the tasks assigned to a slot cannot exceed the duration of the slot. When the
+                # constraint is strict
+                self.model.Add(sum_tasks_slot <= int(slot.slot.get_duration().total_seconds() / 60)). \
+                    OnlyEnforceIf(self.strict[index_slot])
 
-            self.model.Add(self.penalties[index_slot] == 0).OnlyEnforceIf(self.strict[index_slot])
+                self.model.Add(self.penalties[index_slot] == 0).OnlyEnforceIf(self.strict[index_slot])
 
-            # When the constraint is not strict we enforce a penalty
-            self.model.Add(sum_tasks_slot > int(slot.slot.get_duration().total_seconds() / 60)).\
-                OnlyEnforceIf(self.strict[index_slot].Not())
+                # When the constraint is not strict we enforce a penalty
+                self.model.Add(sum_tasks_slot > int(slot.slot.get_duration().total_seconds() / 60)). \
+                    OnlyEnforceIf(self.strict[index_slot].Not())
 
-            violation = sum_tasks_slot - int(slot.slot.get_duration().total_seconds() / 60)
-            self.model.Add(self.penalties[index_slot] >= violation).\
-                OnlyEnforceIf(self.strict[index_slot].Not())
+                violation = sum_tasks_slot - int(slot.slot.get_duration().total_seconds() / 60)
+                self.model.Add(self.penalties[index_slot] >= violation). \
+                    OnlyEnforceIf(self.strict[index_slot].Not())
+            else:
+                self.model.Add(sum_tasks_slot <= int(slot.slot.get_duration().total_seconds() / 60))
 
+        if self.options.hard_constraint_priority:
+            # Add constraint about priority of tasks
+            pass
+
+    def define_values(self) -> Dict:
+        MULTIPLIERS = {}
+        # This is a very meaningful but abstract representation.
+        # todo : learn it using ML from the user! It is very personal
+        # depending on that it means priority for user . Ask for feedback to know if they are satisfied from certain
+        # suggestions.
+
+        # It means how much value is assigned for completing a task in a given day!. For example completening a task
+        # of priority 1 on day 0 gives 100 points, on day 1 gives 50 points, on day 2 gives 40 points, etc. The same
+        # for priority 1, 2, 3, 4, 5.
+        # priority 0 means it must be executed now
+        MULTIPLIERS[0] = [1000, 0, 0, 0, 0, 0]
+        MULTIPLIERS[1] = [100, 50, 10, 10, 10, 10]
+        MULTIPLIERS[2] = [50, 25, 5, 5, 5, 5]
+        MULTIPLIERS[3] = [40, 20, 3, 3, 3, 3]
+        MULTIPLIERS[4] = [30, 15, 2, 2, 2, 2]
+        MULTIPLIERS[5] = [20, 10, 1, 1, 1, 1]
+        MULTIPLIERS[6] = [10, 5, 0.5, 0.5, 0.5, 0.5]
+
+        return MULTIPLIERS
 
     def define_objective(self):
         objective_terms = []
-        MAX_PRIORITY = 10
+
+        MULTIPLIERS = self.define_values()
+        values = {}
+        # Define the values of each assignment based on the priority of the task and the day of the slot
+        for slot_index, slot in enumerate(self.available_slots):
+            for task_index, task in enumerate(self.all_tasks):
+                values[slot_index, task_index] = MULTIPLIERS[task.priority][slot.day]
 
         # Maximize the amount of tasks to be completed, prioritizing the most important ones to be in closer slots.
         for task_index, task in enumerate(self.all_tasks):
             for slot_index, slot in enumerate(self.available_slots):
-                term = self.x[slot_index, task_index] * (MAX_PRIORITY - task.priority) * (self.number_days - slot.day)
+                term = self.x[slot_index, task_index] * values[slot_index, task_index]
                 objective_terms.append(term)
 
-        # Minimize the number of minutes left free in the slots (fill tightly)
-        for slot_index, slot in enumerate(self.available_slots):
-            # Get the duration of the slot and subtract the time of the tasks
-            term = slot.slot.get_duration().total_seconds() / 60
-            for task_index, task in enumerate(self.all_tasks):
-                term -= self.x[slot_index, task_index] * task.estimated_time
-
-            # Add the term to the objective, our aim is to minimize this free time
-            objective_terms.append(-term)
+        # # Minimize the number of minutes left free in the slots (fill tightly)
+        # for slot_index, slot in enumerate(self.available_slots):
+        #     # Get the duration of the slot and subtract the time of the tasks
+        #     term = slot.slot.get_duration().total_seconds() / 60 - \
+        #            sum([self.x[slot_index, task_index] * task.estimated_time
+        #                 for task_index, task in enumerate(self.all_tasks)])
+        #
+        #     # Add the term to the objective, our aim is to minimize this free time
+        #     objective_terms.append(-term)
 
         # Minimize the number of penalties. Multiplied for making a very strong penalty
-        for slot_index, slot in enumerate(self.available_slots):
-            objective_terms.append(-self.penalties[slot_index] * MAX_PRIORITY * self.number_days)
+
+        if self.options.soft_margins:
+            for slot_index, slot in enumerate(self.available_slots):
+                objective_terms.append(-self.penalties[slot_index])  # * MAX_PRIORITY * self.number_days)
 
         return objective_terms
 
     def print_solution(self):
         # Print the solution
         if self.status == cp_model.OPTIMAL or self.status == cp_model.FEASIBLE:
-            print(f'Total cost = {self.solver.ObjectiveValue()}\n')
+            print("Optimal : ", self.status == cp_model.OPTIMAL)
+            print(f'Total \"points\" = {self.solver.ObjectiveValue()}\n')
             for slot_index, slot in enumerate(self.available_slots):
                 print(f'Slot {slot}:')
                 assigned_minutes = 0
+                assigned_tasks = 0
                 for task_index, task in enumerate(self.all_tasks):
                     if self.solver.BooleanValue(self.x[slot_index, task_index]):
-                        print(f'\tTask {task}.' +
+                        print(f'\t{assigned_tasks + 1})Task {task}.' +
                               f'\tValue = {(self.MAX_PRIORITY - task.priority) * (self.number_days - slot.day)}')
                         assigned_minutes += task.estimated_time
-                print("\tAssigned minutes: ", assigned_minutes,'/', int(slot.slot.get_duration().total_seconds() / 60))
+                        assigned_tasks += 1
+                print("")
+                print("\tAssigned minutes: ", assigned_minutes, '/', int(slot.slot.get_duration().total_seconds() / 60))
                 print("\tPenalty: ", self.solver.Value(self.penalties[slot_index]))
                 print("\tStrict: ", self.solver.BooleanValue(self.strict[slot_index]))
-                print("")
+                print("\n\n")
+
 
 
         else:

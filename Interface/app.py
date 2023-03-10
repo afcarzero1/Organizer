@@ -85,13 +85,13 @@ if choice == "Create Task ✅":
         task_category = st.selectbox("Category", ["Personal"])
         task_estimated_time = st.slider("Estimated Time",
                                         min_value=0.5,
-                                        max_value=3.,
+                                        max_value=5.,
                                         value=0.5,
                                         step=0.5)
 
     with col2:
         task_status = st.selectbox("Status", ["ToDo", "Doing", "Done"])
-        task_priority = st.selectbox("Priority", ["High", "Middle", "Low"])
+        task_priority = st.selectbox("Priority", ["Immediate","High", "Middle", "Low"])
 
         task_due_date = st.date_input("Due Date")
 
@@ -144,7 +144,7 @@ elif choice == "Update Task 👨‍💻":
                                        DataBasehandler.str_to_status(task_to_modify[DataBasehandler.COLUMNS_NAMES[3]])
                                        )
             task_priority = st.selectbox("Priority",
-                                         ["High", "Middle", "Low"],
+                                         ["Immediate","High", "Middle", "Low"],
                                          DataBasehandler.str_to_priority(
                                              task_to_modify[DataBasehandler.COLUMNS_NAMES[2]]))
 
@@ -162,9 +162,6 @@ elif choice == "Update Task 👨‍💻":
 
             time.sleep(5)
             st.experimental_rerun()
-
-
-
 
 
 elif choice == "Delete Task ❌":
