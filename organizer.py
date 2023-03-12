@@ -3,6 +3,7 @@ import datetime
 import os.path
 from typing import List, Dict, Tuple
 
+from httplib2 import ServerNotFoundError
 from ortools.sat.python import cp_model
 
 from Interface.pages.databases import Slot, Task
@@ -22,6 +23,8 @@ class DaySlot:
     day: int
     slot: Slot
     hard_length: int = 60 * 24
+    hard_start_time: datetime.datetime = datetime.time(0, 0, 0)
+    hard_end_time: datetime.datetime = datetime.time(23, 59, 59)
 
     @property
     def id(self):
@@ -31,11 +34,34 @@ class DaySlot:
         return 'Day' + str(self.day) + ':' + str(self.slot)
 
 
+@dataclasses.dataclass
+class TaskEvent:
+    """
+    A task event is a combination of a task and a day slot
+
+    Attributes:
+        start (datetime.datetime) : The start time of the event
+        end (datetime.datetime) : The end time of the event
+        task (Task) : The task associated to it
+
+    """
+    start: datetime.datetime
+    end: datetime.datetime
+    task: Task
+
+
+@dataclasses.dataclass
+class SlotAssignment:
+    slot: DaySlot
+    tasks: List[Task]
+
+
 class PreProcessor:
     """
     A class to preprocess the data before solving the problem
     """
     DATE_FORMAT = '%Y-%m-%dT%H:%M:%S%z'
+    APPLICATION_COLORS = ['1', '2', '3', '4', '5']
 
     @staticmethod
     def compute_slots_minutes(slots: List[Slot]
@@ -111,8 +137,15 @@ class PreProcessor:
         credential_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "Calendar", "credentials.json")
         token_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "Calendar", "token.json")
 
-        calendar_querier = Querier(credentials_path=credential_path, token_path=token_path)
-        upcoming_events = calendar_querier.get_next_events(PreProcessor.estimate_days_feasibility(slots, tasks) + 2)
+        try:
+            calendar_querier = Querier(credentials_path=credential_path, token_path=token_path)
+            upcoming_events = calendar_querier.get_next_events(PreProcessor.estimate_days_feasibility(slots, tasks) + 2)
+        except ServerNotFoundError:
+            print("Check your internet connection")
+            exit(-1)
+
+        # Filter only those events that cannot be moved
+        upcoming_events = PreProcessor.filter_events(upcoming_events)
 
         # Divide events by day
         occupied_times = []
@@ -146,10 +179,20 @@ class PreProcessor:
                     clear_slot = Slot(id=slot.id, type="Work", start=cleared_slot[0].time(), end=cleared_slot[1].time())
 
                     margin_low, margin_high = PreProcessor.compute_margins(clear_slot, occupied_times, day)
+
+                    # Compute the low margin time and the high margin time, also the hard length limit of the slot
+                    hard_low = (cleared_slot[0] - datetime.timedelta(minutes=margin_low))
+                    hard_high = (cleared_slot[1] + datetime.timedelta(minutes=margin_high))
+                    slot_length = int(clear_slot.get_duration().total_seconds() / 60)
+                    hard_length = slot_length + margin_high + margin_low
+
+                    # Add the slot to the list
                     all_slots.append(
                         DaySlot(day,
                                 clear_slot,
-                                hard_length = int(slot.get_duration().total_seconds()/60) + margin_high + margin_low)
+                                hard_length=hard_length,
+                                hard_start_time=hard_low,
+                                hard_end_time=hard_high)
                     )
 
         return all_slots
@@ -244,14 +287,40 @@ class PreProcessor:
         return available_intervals
 
     @staticmethod
-    def filter_slots():
-        pass
+    def filter_events(upcoming_events: List[Dict]) -> List[Dict]:
+        """
+        Get only those events set by user and not by the system.
+        :return:
+        """
+        filtered_events = []
+        for event in upcoming_events:
 
+            # Get the color id
+            color_id = event.get("colorId", '-1')
 
-class SlotAssignment:
-    def __init__(self, slot: DaySlot, tasks: List[Task]):
-        self.slot = slot
-        self.tasks = tasks
+            if color_id in PreProcessor.APPLICATION_COLORS:
+                continue
+            else:
+                filtered_events.append(event)
+
+        return filtered_events
+
+    @staticmethod
+    def dayslot_to_datetime(slot: DaySlot) -> Tuple[datetime.datetime, datetime.datetime]:
+        """
+        Convert a DaySlot to a tuple of datetime
+
+        Args:
+            slot (DaySlot) : The slot to convert
+
+        Returns:
+            (Tuple[datetime.datetime,datetime.datetime]) : The converted slot
+        """
+        slot_start = datetime.datetime.combine(datetime.date.today() + datetime.timedelta(days=slot.day),
+                                               slot.slot.start)
+        slot_end = datetime.datetime.combine(datetime.date.today() + datetime.timedelta(days=slot.day), slot.slot.end)
+
+        return (slot_start, slot_end)
 
 
 class SolverSchedule:
@@ -300,9 +369,28 @@ class SolverSchedule:
 
     def solve_problems(self):
         """
-        Solve the scheduling task
+        Solve the scheduling task until a feasible number of days is found
 
         """
+        status = cp_model.INFEASIBLE
+
+        # While the status is not successful increase the number of days
+        while status != cp_model.FEASIBLE and status != cp_model.OPTIMAL:
+            status = self._solve_problem(self.number_days)
+            self.print_solution()
+            self.number_days += 1
+
+    def _solve_problem(self, days: int):
+        """
+        Solve the scheduling problem for a given number of days
+
+        Args:
+            days (int) : The number of days to schedule
+
+        """
+        # Initialize the number of slots
+        self.available_slots = PreProcessor.generate_days_slots(self.all_slots, self.all_tasks, days)
+
         # Re-initialize the variables
         self.x = {}
         self.strict = {}
@@ -319,8 +407,7 @@ class SolverSchedule:
         self.solver = cp_model.CpSolver()
         self.status = self.solver.Solve(self.model)
 
-        # Print the solution
-        self.print_solution()
+        return self.status
 
     def define_variables(self):
         """
@@ -362,7 +449,7 @@ class SolverSchedule:
                                   for task in range((len(self.all_tasks)))))
 
             # Define the very hard margin of the slots
-            #self.model.Add(sum_tasks_slot <= slot.hard_length)
+            self.model.Add(sum_tasks_slot <= slot.hard_length)
 
             if self.options.soft_margins:
                 # The sum of the duration of the tasks assigned to a slot cannot exceed the duration of the slot. When the
@@ -403,7 +490,7 @@ class SolverSchedule:
         # of priority 1 on day 0 gives 100 points, on day 1 gives 50 points, on day 2 gives 40 points, etc. The same
         # for priority 1, 2, 3, 4, 5.
         # priority 0 means it must be executed now
-        MULTIPLIERS[0] = [1000, 0, 0, 0, 0, 0]
+        MULTIPLIERS[0] = [100000, 0, 0, 0, 0, 0]
         MULTIPLIERS[1] = [100, 50, 10, 10, 10, 10]
         MULTIPLIERS[2] = [50, 25, 5, 5, 5, 5]
         MULTIPLIERS[3] = [40, 20, 3, 3, 3, 3]
@@ -493,3 +580,149 @@ class SolverSchedule:
                     assigned_tasks.append(task)
             solution.append(SlotAssignment(slot, assigned_tasks))
         return solution
+
+
+class SolverOrganizer:
+    class Options:
+        """
+        Options for the solver.
+        """
+
+        def __init__(self, hard_constraint_priority: bool = True, soft_margins: bool = True):
+            self.hard_constraint_priority = hard_constraint_priority
+            self.soft_margins = soft_margins
+
+    def __init__(self, options: Options = Options()):
+        """
+        self.options = options
+        """
+        self.options = options
+
+    def solve(self, assignment: SlotAssignment) -> List[TaskEvent]:
+        """
+        Solve the problem.
+
+        Args:
+            assignment (SlotAssignment) : The assignment to solve
+        Returns:
+            solution (List[SlotAssignment]) : The solution of the problem
+        """
+
+        day = datetime.datetime.combine(
+            datetime.date.today() + datetime.timedelta(days=assignment.slot.day), datetime.time(0, 0)
+        )
+
+        # Compute number of minutes of tasks
+        tasks_length = PreProcessor.compute_tasks_minutes(assignment.tasks)
+        slot_length = PreProcessor.compute_slots_minutes([assignment.slot.slot])
+
+        # If the tasks is lower than the slot put them closer to midday
+        if tasks_length <= slot_length:
+
+            proposal_start1 = datetime.datetime.combine(day, assignment.slot.slot.start)
+            proposal_start2 = datetime.datetime.combine(day, assignment.slot.slot.start) \
+                              + datetime.timedelta(minutes=slot_length - tasks_length)
+
+            midday = datetime.datetime.combine(day, datetime.time(12, 0))
+
+            # If the first proposal is closer to midday, use it
+            if abs(proposal_start1 - midday) < abs(proposal_start2 - midday):
+                proposal_start = proposal_start1
+            else:
+                proposal_start = proposal_start2
+
+        else:
+
+            slot_start = datetime.datetime.combine(day, assignment.slot.slot.start)
+            slot_end = datetime.datetime.combine(day, assignment.slot.slot.end)
+
+            hard_start = assignment.slot.hard_start_time
+            hard_end = assignment.slot.hard_end_time
+
+            start_position = SolverOrganizer._find_segment_position(int((hard_start - day).total_seconds() / 60),
+                                                                    int((hard_end - day).total_seconds() / 60),
+                                                                    int((slot_start - day).total_seconds() / 60),
+                                                                    int((slot_end - day).total_seconds() / 60),
+                                                                    tasks_length)
+
+            proposal_start = day + datetime.timedelta(minutes=start_position)
+
+        # Having the starting time for the tasks just put them in the slot in order
+
+        task_events = []
+        for task in assignment.tasks:
+            task_start = proposal_start
+            proposal_start += datetime.timedelta(minutes=task.estimated_time)
+
+            task_events.append(TaskEvent(task_start, proposal_start, task))
+
+        return task_events
+
+    def solve_all(self, assignments: List[SlotAssignment]) -> List[TaskEvent]:
+        """
+        Solve the problem.
+
+        Args:
+            assignments (List[SlotAssignment]) : The assignments to solve
+        Returns:
+            solution (List[TaskEvent]) : The solution of the problem
+        """
+
+        task_events = []
+        for assignment in assignments:
+            task_events += self.solve(assignment)
+
+        return task_events
+
+    def set_in_calendar(self,
+                        task_events: List[TaskEvent]):
+        """
+        Set the events in the calendar.
+
+        Args:
+            task_events (List[TaskEvent]) : The events to set
+        """
+
+        querier = Querier()
+
+        for task_event in task_events:
+            summary = task_event.task.name
+            description = f"Estimated to last for {task_event.task.estimated_time}"
+
+            querier.set_event(summary, description, task_event.start, task_event.end)
+
+    @staticmethod
+    def _find_segment_position(A, B, a, b, d):
+        """
+        Finds the position of a line segment of length d that maximizes the overlap with the sub-interval (a,b),
+        but does not go out of the interval (A,B).
+
+        Args:
+        - A, B: float or int - the endpoints of the interval (A,B)
+        - a, b: float or int - the endpoints of the sub-interval (a,b)
+        - d: float or int - the length of the line segment
+
+        Returns:
+        - float or int - the position of the line segment that maximizes the overlap with the sub-interval (a,b)
+        """
+
+        # Compute the length of the overlap between the intervals (A,B) and (a,b)
+        overlap_length = min(B, b) - max(A, a)
+
+        # Compute the maximum distance that the line segment can be shifted to the right without going out of (A,B)
+        max_shift_right = B - d
+
+        # Compute the maximum distance that the line segment can be shifted to the left without going out of (A,B)
+        max_shift_left = A
+
+        # If there is no overlap between the intervals (A,B) and (a,b), return the midpoint of the interval (A,B)
+        if overlap_length <= 0:
+            return (A + B) / 2
+
+        # If the length of the overlap is greater than or equal to the length of the line segment, the line segment can be fully contained in (a,b)
+        if overlap_length >= d:
+            return max(A, min(max_shift_right, (a + b - d) / 2))
+
+        # If the length of the overlap is less than the length of the line segment, the line segment needs to be partially contained in (a,b)
+        else:
+            return max(A, min(max_shift_right, b - overlap_length))

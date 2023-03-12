@@ -1,4 +1,5 @@
 import dataclasses
+from pprint import pprint
 from typing import Any, List, Dict
 
 from Interface.pages.databases import DataBasehandler, ScheduleDatabase, Task, Slot
@@ -7,7 +8,7 @@ import pandas as pd
 from ortools.sat.python import cp_model
 from termcolor import colored
 
-from organizer import SolverSchedule
+from organizer import SolverSchedule, SolverOrganizer
 
 
 def main():
@@ -28,6 +29,13 @@ def main():
     assignments = scheduler.get_solution()
 
     # Organize solution with hard constraints
+    organizer = SolverOrganizer()
+    events = organizer.solve_all(assignments)
+    pprint(events)
+
+    # Set them in the calendar
+    organizer.set_in_calendar(events)
+
 
 if __name__ == '__main__':
     main()
