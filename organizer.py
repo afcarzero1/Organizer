@@ -139,6 +139,7 @@ class PreProcessor:
 
         try:
             calendar_querier = Querier(credentials_path=credential_path, token_path=token_path)
+            calendar_querier.delete_events()
             upcoming_events = calendar_querier.get_next_events(PreProcessor.estimate_days_feasibility(slots, tasks) + 2)
         except ServerNotFoundError:
             print("Check your internet connection")

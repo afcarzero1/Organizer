@@ -22,6 +22,7 @@ class Querier:
     """
     Class to query the calendar.
     """
+
     def __init__(self,
                  token_path: str = DEFAULT_PATH_TOKEN,
                  credentials_path: str = DEFAULT_PATH_CREDENTIALS):
@@ -38,7 +39,6 @@ class Querier:
         self.credentials_path = credentials_path
 
         self.creds = self._credentials()
-
 
     def _credentials(self) -> Credentials:
         creds = None
@@ -92,7 +92,7 @@ class Querier:
                   description: str,
                   start: datetime.datetime,
                   end: datetime.datetime,
-                  type:int = 0):
+                  type: int = 0):
         """
         Set an event in the calendar
         Args:
@@ -125,12 +125,23 @@ class Querier:
         event = service.events().insert(calendarId='primary', body=event).execute()
         print(f'Event created: {event.get("htmlLink")}')
 
+    def delete_events(self):
+        """
+        Deletes the events set by the calendar before.
+
+        """
+        events = self.get_next_events()
+
+        service = build('calendar', 'v3', credentials=self.creds)
+
+        for event in events:
+            if event.get('colorId', '-1') == '9':
+                service.events().delete(calendarId='primary', eventId=event['id']).execute()
 
 
 def main():
     querier = Querier()
     events = querier.get_next_events()
-
 
 
 if __name__ == '__main__':
