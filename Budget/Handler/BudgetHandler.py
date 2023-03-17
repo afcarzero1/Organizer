@@ -64,7 +64,7 @@ class BudgetHandler:
     Attributes:
         simulation_initial_date (datetime.datetime) : Initial date of the simulation
         simulation_final_date (datetime.datetime) : Final date of the simulation
-        transactions (Dict[List[ExpectedTransaction]]) : Dictionary containing the transactions.
+        _transactions (Dict[List[ExpectedTransaction]]) : Dictionary containing the transactions.
             The key is the type of transaction.
     """
 
@@ -86,12 +86,12 @@ class BudgetHandler:
         self.simulation_final_date: datetime.datetime = final_date
 
         # Initialize transactions with empty lists. A list is created for each type of transaction
-        self.transactions: {[ExpectedTransaction]} = {}
+        self._transactions: {[ExpectedTransaction]} = {}
         self._tables_days: {pd.DataFrame} = {}
 
         # Initialize the dictionary with the types of transactions
         for type_name in Types:
-            self.transactions[type_name] = list()
+            self._transactions[type_name] = list()
             self._tables_days[type_name] = pd.DataFrame()
 
         # Set the initial balance
@@ -111,6 +111,33 @@ class BudgetHandler:
         copyo["Month"] = copyo.index.month
 
         return {Types.Expense: copye, Types.Income: copyo}
+
+    @property
+    def transactions(self):
+        """
+        Return the transaction in a readable way
+
+        Returns:
+            Dict[pd.DataFrame] : Dictionary containing the transactions. The key is the type of transaction.
+        """
+        to_return = {}
+        for transaction_type in Types:
+            # Get all the transactions relative to this type
+            grouped_transactions = self._transactions[transaction_type]
+
+            list_dicts = []
+            # Iterate over all of them
+            for transaction in grouped_transactions:
+                dictionary = {
+                    "Category" : transaction.category,
+                    "Value" : transaction.value,
+                    "Recurrency" : transaction.recurrency
+                }
+                list_dicts.append(dictionary)
+
+            to_return[transaction_type] = pd.DataFrame(list_dicts)
+
+        return to_return
 
     @property
     def initial_balance(self):
@@ -206,8 +233,9 @@ class BudgetHandler:
             category_type (str) : The type of transaction. It can be either "Expense" or "Income". Check the :class:`Types`
 
         """
+
         assert category_type in Types, f"Invalid category type: {category_type}"
-        self.transactions[category_type].append(transaction)
+        self._transactions[category_type].append(transaction)
 
         transaction_arrays: (np.ndarray, np.ndarray) = self._create_transaction_array(transaction)
 
@@ -315,7 +343,7 @@ class BudgetHandler:
 
         # Re-insert all transactions
         for type_name in Types:
-            for transaction in self.transactions[type_name]:
+            for transaction in self._transactions[type_name]:
                 transaction_arrays: (np.ndarray, np.ndarray) = self._create_transaction_array(transaction)
 
                 # Check if the category already exists. In case it exists simply add up

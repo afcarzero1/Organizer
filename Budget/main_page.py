@@ -3,6 +3,7 @@ import numpy as np
 from Handler.BudgetHandler import Types, BudgetHandler, ExpectedTransaction
 import streamlit as st
 from dateutil.relativedelta import relativedelta
+from st_aggrid import AgGrid
 
 st.set_page_config(
     page_title="Budget",
@@ -18,21 +19,23 @@ def create_budget_handler() -> BudgetHandler:
 
     return budget_handler
 
-def display_metrics(budget_handler: BudgetHandler):
 
+def display_metrics(budget_handler: BudgetHandler):
     col1, col2, col3, col4 = st.columns((1, 1, 1, 1))
 
     with col1:
-        st.metric("Minimum Balance", np.min(budget_handler.balance), delta = np.min(budget_handler.balance) - budget_handler.initial_balance)
+        st.metric("Minimum Balance", np.min(budget_handler.balance),
+                  delta=np.min(budget_handler.balance) - budget_handler.initial_balance)
 
     with col2:
-        st.metric("Maximum Balance", np.max(budget_handler.balance), delta = np.max(budget_handler.balance) - budget_handler.initial_balance)
+        st.metric("Maximum Balance", np.max(budget_handler.balance),
+                  delta=np.max(budget_handler.balance) - budget_handler.initial_balance)
 
     with col3:
-        st.metric("Total Expenses",budget_handler.total_expenses)
+        st.metric("Total Expenses", budget_handler.total_expenses)
 
     with col4:
-        st.metric("Total Incomes",budget_handler.total_incomes)
+        st.metric("Total Incomes", budget_handler.total_incomes)
 
 
 def main():
@@ -60,55 +63,74 @@ def main():
     col1, col2 = st.columns((2, 4))
 
     with col1:
-        st.header("Add Transaction")
-        typec = st.selectbox("Type", [Types.Expense.value, Types.Income.value])
-        category = st.text_input("Category")
-        initial_date = st.date_input("Initial Date")
+        with st.expander("Add Transaction"):
+            typec = st.selectbox("Type", [Types.Expense.value, Types.Income.value])
+            category = st.text_input("Category")
+            initial_date = st.date_input("Initial Date")
 
-        # Handle recurrency of the transaction
+            # Handle recurrency of the transaction
 
-        subcol1, subcol2, subcol3 = st.columns((1, 1, 1))
-        with subcol1:
-            recurrency_years = st.number_input("Recurrency (years)", min_value=0, max_value=100, step=1)
-        with subcol2:
-            recurrency_months = st.number_input("Recurrency (months)", min_value=0, max_value=11, step=1)
-        with subcol3:
-            recurrency_days = st.number_input("Recurrency (days)", min_value=0, max_value=30, step=1)
+            subcol1, subcol2, subcol3 = st.columns((1, 1, 1))
+            with subcol1:
+                recurrency_years = st.number_input("Recurrency (years)", min_value=0, max_value=100, step=1)
+            with subcol2:
+                recurrency_months = st.number_input("Recurrency (months)", min_value=0, max_value=11, step=1)
+            with subcol3:
+                recurrency_days = st.number_input("Recurrency (days)", min_value=0, max_value=30, step=1)
 
-        recurrency = relativedelta(years=recurrency_years, months=recurrency_months, days=recurrency_days)
+            recurrency = relativedelta(years=recurrency_years, months=recurrency_months, days=recurrency_days)
 
-        # Value of the transaction
-        value = st.number_input("Value", min_value=0., step=1.)
+            # Value of the transaction
+            value = st.number_input("Value", min_value=0., step=1.)
 
-        # Final date
-        agree = st.checkbox('Final Date?')
-        if agree:
-            final_date = st.date_input("Final Date (optional)", None)
-        else:
-            final_date = None
-
-        # Handle case of not recurrencies
-        if recurrency_days == 0 and recurrency_months == 0 and recurrency_years == 0:
-            recurrency = None
-
-        # Create the transaction
-        transaction = ExpectedTransaction(category=category,
-                                          initial_date=initial_date,
-                                          recurrency=recurrency,
-                                          value=value,
-                                          final_date=final_date)
-
-        # Add the transaction
-        if st.button("Add Transaction"):
-            # Convert the type to the enum
-            if typec == Types.Expense.value:
-                typec = Types.Expense
+            # Final date
+            agree = st.checkbox('Final Date?')
+            if agree:
+                final_date = st.date_input("Final Date (optional)", None)
             else:
-                typec = Types.Income
+                final_date = None
 
-            budget_handler.add_expected_transaction(transaction, typec)
-            budget_handler.compute_balances()
-            st.success("Transaction added successfully.")
+            # Handle case of not recurrencies
+            if recurrency_days == 0 and recurrency_months == 0 and recurrency_years == 0:
+                recurrency = None
+
+            # Create the transaction
+            transaction = ExpectedTransaction(category=category,
+                                              initial_date=initial_date,
+                                              recurrency=recurrency,
+                                              value=value,
+                                              final_date=final_date)
+
+            # Add the transaction
+            if st.button("Add Transaction"):
+                update_table = True
+                # Convert the type to the enum
+                if typec == Types.Expense.value:
+                    typec = Types.Expense
+                else:
+                    typec = Types.Income
+
+                budget_handler.add_expected_transaction(transaction, typec)
+                budget_handler.compute_balances()
+                st.success("Transaction added successfully.")
+                st.experimental_rerun()
+            else:
+                update_table = False
+
+        # Display all the transactions
+        st.subheader("Expenses Transactions")
+        all_expense_transactions = budget_handler.transactions[Types.Expense]
+        expense_table_returned = AgGrid(all_expense_transactions,
+                                        key="expenses_transactions",
+                                        use_checkbox=True,
+                                        single_selection=True)
+
+        st.subheader("Income Transactions")
+        all_income_transactions = budget_handler.transactions[Types.Income]
+        income_table_returned = AgGrid(all_income_transactions,
+                                       key="incomes_transactions",
+                                       use_checkbox=True,
+                                       single_selection=True)
 
     with col2:
         # Get the graphic of the balance
@@ -125,7 +147,7 @@ def main():
 
         with st.expander("Incomes"):
             st.table(income_table.style.set_properties(**{'font-size': '12pt', 'font-family': 'Calibri'}).set_caption(
-                "Your Title"))
+                "Incomes"))
 
     st.write("Transaction Details:")
     st.write(transaction)
